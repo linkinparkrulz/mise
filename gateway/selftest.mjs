@@ -713,6 +713,38 @@ console.log("\nfirst-run identity");
   await rm(dir, { recursive: true, force: true });
 }
 
+// ---- the PayNym signing op is not a forgery oracle --------------------------
+// The notification key signs invoice addresses AND paynym.rs auth tokens. That
+// overlap is the whole risk: a gateway that will sign any string hands a
+// compromised web server a way to mint an address record every customer's check
+// accepts, which is precisely what identity.ts exists to prevent.
+console.log("\nthe token signing op");
+{
+  test("a real token signs", () => {
+    assert.ok(storeId.signToken("abc123DEF456.tok_-en+/=").length > 40);
+  });
+
+  test("a canonicalAddress can never be signed as a token", () => {
+    // The exact forgery: an attacker's address, formatted as the thing a
+    // customer's verifier checks. If this signs, that record verifies.
+    const forged = canonicalAddress({
+      v: 1, address: "bc1qattacker", index: 0, type: "p2wpkh",
+      network: "bitcoin", paymentCode: storeId.paymentCode(),
+    });
+    assert.throws(() => storeId.signToken(forged), /does not sign arbitrary text/);
+  });
+
+  test("and the refusal is the character set, not a blocklist", () => {
+    // Anything carrying a brace, a quote or whitespace is out wherever it sits,
+    // so there is no encoding of an address record that slips through.
+    for (const bad of ["{", '"', "a{b", 'a"b', "a b", "a\tb", "a\nb", "short", ""]) {
+      assert.throws(() => storeId.signToken(bad), /does not sign arbitrary text/, JSON.stringify(bad));
+    }
+    assert.ok(storeId.signToken("A".repeat(256)).length > 40, "256 is allowed");
+    assert.throws(() => storeId.signToken("A".repeat(257)), /does not sign arbitrary text/);
+  });
+}
+
 // ---- the bot's own spendable chain ------------------------------------------
 // Checked against the BIP84 published vectors rather than against our own
 // output. Our derivation agreeing with itself establishes nothing an operator

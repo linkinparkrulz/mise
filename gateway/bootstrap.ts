@@ -319,6 +319,63 @@ export function bindReceiver(state: IdentityState, network: Network, personalPay
   };
 }
 
+/**
+ * Record the PayNym this network's payment code was claimed as.
+ *
+ * Per network because a PayNym is a function of the payment code and the two
+ * networks have different codes, so they are two independent identities with
+ * different names and different avatars. Neither waits on the other.
+ *
+ * Idempotent in the caller's favour: re-recording the same nym is a no-op, and
+ * a DIFFERENT nym for a code that already has one is refused. paynym.rs derives
+ * the nym from the code, so a second, different answer for the same code means
+ * something is wrong upstream, and quietly overwriting would lose the name the
+ * operator has already seen in their wallet.
+ */
+export function recordNym(
+  state: IdentityState, network: Network, nym: { nymName: string; nymId?: string | null },
+): IdentityState {
+  const block = state.networks[network];
+  if (!block) throw new Error(`unknown network: ${network}`);
+  const name = String(nym?.nymName || "").trim();
+  if (!name) throw new Error("refusing to record an empty nym name");
+  if (block.nymName && block.nymName !== name) {
+    throw new Error(
+      `${network} is already claimed as ${block.nymName}; paynym.rs now says ${name}. ` +
+      "A nym is derived from the payment code, so two different answers for one code is not a rename.");
+  }
+  return {
+    ...state,
+    networks: { ...state.networks, [network]: { ...block, nymName: name, nymId: nym.nymId ?? block.nymId ?? null } },
+  };
+}
+
+/**
+ * Record that this network's notification transaction is on-chain.
+ *
+ * This is the write that finally retires the funding prompt, and it is what
+ * bindReceiver's "already announced" guard has been guarding against all along
+ * with nothing able to set it. Refuses a second, different txid: the pair has
+ * been announced once and announcing it again under a new txid would leave the
+ * record describing whichever call happened to land last.
+ */
+export function recordNotification(
+  state: IdentityState, network: Network, txid: string, at: string = new Date().toISOString(),
+): IdentityState {
+  const block = state.networks[network];
+  if (!block) throw new Error(`unknown network: ${network}`);
+  const id = String(txid || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(id)) throw new Error(`that is not a txid: ${JSON.stringify(txid)}`);
+  if (block.notificationTxid && block.notificationTxid !== id) {
+    throw new Error(
+      `${network} already records notification ${block.notificationTxid}; refusing to replace it with ${id}`);
+  }
+  return {
+    ...state,
+    networks: { ...state.networks, [network]: { ...block, notificationTxid: id, notificationSentAt: at } },
+  };
+}
+
 /** Record which node this network's chain work goes through. */
 export function setDojo(state: IdentityState, network: Network, dojo: DojoChoice | null): IdentityState {
   const block = state.networks[network];

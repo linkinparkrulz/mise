@@ -313,6 +313,51 @@ route("POST", /^\/api\/admin\/store-identity\/network$/, async (req, res) => {
   if (out) json(res, 200, out);
 });
 
+// Claim the shop's PayNyms — one per network, both at first run.
+//
+// A POST with no body: it claims whatever is unclaimed, and does nothing for a
+// network that already has a nym. Safe to press twice, because /create is an
+// upsert and the gateway refuses to record a different nym over an existing one.
+route("POST", /^\/api\/admin\/store-identity\/paynym$/, async (req, res) => {
+  if (!(await adminFrom(req, res))) return;
+  const identity = await viaGateway(res, { op: "identity" });
+  if (!identity) return;
+  const { claimMissing } = await import("./shop-paynym.mjs");
+  const dataDir = process.env.PUBLIC_DATA_DIR || path.join(ROOT, "data");
+  // Each row carries its own error. A directory outage on one network must not
+  // fail the request, because the other network may well have succeeded and the
+  // operator needs to see which.
+  const rows = await claimMissing((r) => gatewayAsk(r), identity, dataDir);
+  json(res, 200, { ok: rows.some((r) => !r.error), results: rows });
+});
+
+// Follow the bound receiver, as this network's nym.
+//
+// Separate from the claim because it needs a receiver and setup has none. The
+// directory's /follow is chain-agnostic, so `network` picks which of the shop's
+// identities does the following rather than constraining the target.
+route("POST", /^\/api\/admin\/store-identity\/follow$/, async (req, res) => {
+  if (!(await adminFrom(req, res))) return;
+  let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: "invalid JSON" }); }
+  const identity = await viaGateway(res, { op: "identity" });
+  if (!identity) return;
+  const network = String(body.network || identity.active);
+  const block = identity.networks?.[network];
+  if (!block) return json(res, 400, { error: `unknown network: ${network}` });
+  if (!block.nymName) {
+    return json(res, 400, { error: `${network} has no PayNym yet: claim one before following with it` });
+  }
+  if (!block.receiverPaymentCode) {
+    return json(res, 400, { error: `${network} has no receiver bound: there is nobody to follow` });
+  }
+  const { followAs } = await import("./shop-paynym.mjs");
+  try {
+    json(res, 200, await followAs((r) => gatewayAsk(r), network, block.paymentCode, block.receiverPaymentCode));
+  } catch (e) {
+    json(res, 502, { error: (e as Error).message });
+  }
+});
+
 // The seed reveal.
 //
 // A POST rather than a GET so the twelve words are never a URL: not in an nginx

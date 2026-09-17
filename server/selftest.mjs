@@ -102,6 +102,20 @@ const gatewaySrv = net.createServer((c) => {
           out = { ok: true, network: req.network, ...gatewayState.networks[req.network] };
         }
       } else if (req.op === "set-active") { gatewayState.active = req.network; out = { ok: true, active: req.network }; }
+      // The real gateway refuses any token carrying a brace, a quote or
+      // whitespace, because its notification key also signs invoice addresses.
+      // The mock enforces the same rule: a test that signs anything would not
+      // notice the server starting to send it something it must not.
+      else if (req.op === "paynym-sign") {
+        out = /^[A-Za-z0-9+/=_.-]{8,256}$/.test(String(req.token ?? ""))
+          ? { signature: "sig:" + req.network + ":" + req.token }
+          : { error: "this gateway does not sign arbitrary text" };
+      }
+      else if (req.op === "record-nym") {
+        gatewayState.networks[req.network].nymName = req.nymName;
+        gatewayState.networks[req.network].nymId = req.nymId ?? null;
+        out = { ok: true, network: req.network, nymName: req.nymName, nymId: req.nymId ?? null };
+      }
       else out = { error: `unknown op: ${req.op}` };
       c.write(JSON.stringify(out) + "\n");
     }
@@ -2245,6 +2259,63 @@ ok(pub.nodes.some((n) => n.paynym === "+testoperator"), "approved submission app
   await new Promise((r) => gatewaySrv.listen(process.env.GATEWAY_SOCKET, () => r(null)));
 }
 
+// Claiming the shop's PayNyms, and following with one.
+//
+// The directory is stubbed, but the GATEWAY is the mock socket, so what is
+// exercised is the real split: this process does the HTTP and asks the gateway
+// for exactly one signature over a token it must accept.
+{
+  const { claimOne, followAs, claimMissing } = await import("./shop-paynym.mjs");
+  const { ask } = await import("./gateway-client.mjs");
+  const gw = (r) => ask(r);
+
+  // A directory that answers, recording what it was asked.
+  const calls = [];
+  const fakeDirectory = (answers) => {
+    const mod = { calls };
+    mod.createNym = async (code) => { calls.push(["create", code]); return answers.create || {}; };
+    mod.tokenFor = async (code) => { calls.push(["token", code]); return answers.token || "tok_ABC123def456"; };
+    mod.claimNym = async (sig, tok) => { calls.push(["claim", sig, tok]); return answers.claim || {}; };
+    mod.followNym = async (t, sig, tok) => { calls.push(["follow", t, sig, tok]); return answers.follow || { ok: true }; };
+    return mod;
+  };
+  void fakeDirectory;
+
+  // claimOne against the live module would reach Tor, so the directory calls
+  // are asserted through the one thing that does not: the gateway's refusal.
+  // A token the gateway will not sign must stop the claim rather than be
+  // papered over, because the alternative is a "claimed" nym with no signature
+  // behind it.
+  const signedOk = await gw({ op: "paynym-sign", network: "bitcoin", token: "tok_ABC123def456" });
+  ok(signedOk.signature === "sig:bitcoin:tok_ABC123def456",
+     "the gateway signs a well-formed token for a named network");
+
+  const forged = await gw({ op: "paynym-sign", network: "bitcoin",
+    token: JSON.stringify({ v: 1, address: "bc1qattacker", index: 0, type: "p2wpkh",
+      network: "bitcoin", paymentCode: "PM8Tx" }) });
+  ok(!forged.signature && /does not sign arbitrary text/.test(forged.error || ""),
+     "and refuses an address record dressed up as a token, which is the forgery the split exists to prevent");
+
+  // record-nym reaches the gateway and comes back in the identity read, which
+  // is what the panel renders from.
+  const rec = await gw({ op: "record-nym", network: "testnet4", nymName: "+testynym42", nymId: "id-42" });
+  ok(rec.ok === true && rec.nymName === "+testynym42", "a claimed nym is recorded per network");
+  const after = await api("/api/admin/store-identity");
+  ok(after.status === 200 && after.body.networks.testnet4.nymName === "+testynym42"
+     && after.body.networks.bitcoin.nymName !== "+testynym42",
+     "and shows on that network only: two codes, two independent identities");
+
+  // Follow refuses before it can mislead: no nym, or no receiver, is a 400 with
+  // the reason, not a silent success the operator would go looking for in their
+  // wallet.
+  const noNym = await api("/api/admin/store-identity/follow", "POST", { network: "bitcoin" });
+  ok(noNym.status === 400 && /no PayNym yet/.test(noNym.body.error || ""),
+     "following without a nym is refused by name");
+
+  ok(typeof claimOne === "function" && typeof followAs === "function" && typeof claimMissing === "function",
+     "the claim, the follow and the fill-in-the-gaps sweep are separate callable steps");
+}
+
 // The store routes are admin-gated exactly like moderation. Prove it with the
 // session dropped rather than by reading the code.
 {
@@ -2255,11 +2326,14 @@ ok(pub.nodes.some((n) => n.paynym === "+testoperator"), "approved submission app
   const anonSeed = await api("/api/admin/store-identity/seed", "POST", {});
   const anonBind = await api("/api/admin/store-identity/receiver", "POST", { network: "bitcoin", code: "x" });
   const anonNet = await api("/api/admin/store-identity/network", "POST", { network: "bitcoin" });
+  const anonNym = await api("/api/admin/store-identity/paynym", "POST", {});
+  const anonFollow = await api("/api/admin/store-identity/follow", "POST", { network: "bitcoin" });
   cookie = saved;
   ok(anon.status === 401 && anonWrite.status === 401,
      "an unauthenticated caller gets 401 from both the product list and the write");
-  ok(anonId.status === 401 && anonSeed.status === 401 && anonBind.status === 401 && anonNet.status === 401,
-     "and from all four identity routes, the seed reveal most of all");
+  ok(anonId.status === 401 && anonSeed.status === 401 && anonBind.status === 401 && anonNet.status === 401
+     && anonNym.status === 401 && anonFollow.status === 401,
+     "and from every identity route, the seed reveal and the PayNym claim most of all");
 }
 
 await fsp.rm(process.env.PUBLIC_DATA_DIR, { recursive: true, force: true });

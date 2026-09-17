@@ -123,7 +123,43 @@ export class StoreIdentity {
     const sig = message.sign(canonicalAddress(rec), priv, true);
     return { ...rec, signed: Buffer.from(sig).toString("base64") };
   }
+
+  /**
+   * Sign a paynym.rs auth token with the notification key.
+   *
+   * paynym.rs proves ownership of a payment code by having the notification key
+   * sign a token it issues, which is the same key and the same message format
+   * as signAddress. That overlap is the danger, and TOKEN_SHAPE is the answer.
+   *
+   * A general "sign this string" op reachable over the socket would be a
+   * forgery oracle for the thing this file exists to prevent: a compromised web
+   * server could ask for a signature over a crafted canonicalAddress and get a
+   * record for an attacker's address that every customer's check accepts. The
+   * gateway's key would have signed it, so nothing downstream could tell.
+   *
+   * canonicalAddress is always JSON.stringify of an object, so it always opens
+   * with { and always contains ". A token may contain neither. There is
+   * therefore no input to this method that produces a signature over any
+   * address record, whatever the caller intends — which is a property of the
+   * character set rather than of the caller being well behaved.
+   */
+  signToken(token: string): string {
+    const t = String(token ?? "");
+    if (!TOKEN_SHAPE.test(t)) {
+      throw new Error(
+        "refusing to sign that: a paynym.rs token is 8-256 characters of [A-Za-z0-9+/=_.-] and nothing else. " +
+        "This gateway does not sign arbitrary text, because the notification key is also what signs invoice addresses.");
+    }
+    const priv = this.code.getNotificationPrivateKey();
+    return Buffer.from(message.sign(t, priv, true)).toString("base64");
+  }
 }
+
+/**
+ * What a paynym.rs token may look like. Deliberately narrow: no braces, no
+ * quotes, no whitespace, so it cannot spell a canonicalAddress. See signToken.
+ */
+const TOKEN_SHAPE = /^[A-Za-z0-9+/=_.-]{8,256}$/;
 
 /**
  * Check a signed address against a payment code the caller already trusts.

@@ -1378,6 +1378,33 @@ async function loadJSON(url){
       esc(addr)+'</code></div></div>';
   }
 
+  // The wallet's PayNym on this network, and whether it follows the operator.
+  //
+  // Two separate facts, said separately, because conflating them is the same
+  // mistake the funding prompt made. A follow puts the bot in the wallet's
+  // PayNym tab with a name and a face. It does NOT make that wallet watch for
+  // the addresses this shop derives — only the notification transaction does
+  // that, and readiness stays driven by notificationTxid alone.
+  function nymRow(b, net){
+    const avatar = b.paymentCode
+      ? '<img alt="" style="width:20px;height:20px;border-radius:4px;vertical-align:-5px;margin-right:6px"'
+        + ' src="data/avatars/'+encodeURIComponent(b.paymentCode)+'.png" onerror="this.remove()">'
+      : "";
+    if(!b.nymName){
+      return '<p style="font-size:12.5px">No PayNym on '+esc(net)+' yet '+
+        '<button class="abtn" data-shop="claim">Claim PayNym</button>'+
+        '<br><span style="font-size:12px;color:var(--faint)">Claims one for every network that '+
+        'has none. Each network has its own payment code, so each gets its own nym and avatar.</span></p>';
+    }
+    const follow = b.receiverPaymentCode
+      ? '<button class="abtn" data-shop="follow" style="margin-left:6px">Follow my wallet</button>'+
+        '<br><span style="font-size:12px;color:var(--faint)">Puts this bot in your wallet\u2019s PayNym tab. '+
+        'It does not make your wallet watch for this shop\u2019s addresses \u2014 only the notification '+
+        'transaction below does that.</span>'
+      : '<br><span style="font-size:12px;color:var(--faint)">Bind your payment code below and it can follow you.</span>';
+    return '<p style="font-size:12.5px">'+avatar+'<b>'+esc(b.nymName)+'</b>'+follow+'</p>';
+  }
+
   function shopCard(){
     if(SHOP_ERROR){
       return '<h3 style="margin:22px 0 8px">Shop wallet</h3>'+
@@ -1411,6 +1438,7 @@ async function loadJSON(url){
             'Nothing below affects them until you switch. '+
             '<button class="abtn" data-shop="switch" style="margin-left:6px">Trade on '+esc(net)+'</button></p>')+
         '<p style="font-size:12.5px">Payment code <code class="pc-chip" data-copy="'+esc(b.paymentCode)+'">'+chip(b.paymentCode)+'</code></p>'+
+        nymRow(b, net)+
         // The funding prompt, pointed at the DEPOSIT address. A notification
         // transaction spends an input the sender owns; this wallet is the
         // sender, so this is the address it needs money at. Its own notification
@@ -1660,6 +1688,26 @@ async function loadJSON(url){
       else ADMIN_NOTICE = null;
       // Reload rather than assume it worked: the gateway decides what active is
       // now, and the card is about to claim which chain customers are quoted on.
+      await loadShop(); return;
+    }
+    if(act === "claim"){
+      ADMIN_NOTICE = "Claiming over Tor\u2026"; renderAdminPanel();
+      const r = await api.call("/admin/store-identity/paynym", "POST", {});
+      // Per-network rows, because one network's directory trouble says nothing
+      // about the other's — they are independent identities.
+      const rows = (r.body && r.body.results) || [];
+      const bad = rows.filter(x => x.error);
+      ADMIN_NOTICE = bad.length
+        ? bad.map(x => x.network + ": " + x.error).join(" \u00b7 ")
+        : (r.status === 200 ? null : ((r.body && r.body.error) || ("HTTP " + r.status)));
+      await loadShop(); return;
+    }
+    if(act === "follow"){
+      ADMIN_NOTICE = "Following over Tor\u2026"; renderAdminPanel();
+      const r = await api.call("/admin/store-identity/follow", "POST", { network: net });
+      ADMIN_NOTICE = r.status === 200
+        ? "Followed. Check your wallet\u2019s PayNym tab."
+        : ((r.body && r.body.error) || ("HTTP " + r.status));
       await loadShop(); return;
     }
     if(act === "bind"){

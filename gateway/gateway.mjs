@@ -34,6 +34,7 @@ import { addressFor, parseAddressType, DEFAULT_ADDRESS_TYPE } from "./derive.ts"
 import { IndexStore } from "./index-state.ts";
 import {
   loadOrCreate, saveState, revealMnemonic, bindReceiver, setActive, setDojo, readiness,
+  recordNym, recordNotification, isNetwork,
 } from "./bootstrap.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -181,6 +182,29 @@ export function makeHandler({
         if (!shop) return { error: "this gateway was not started with a shop identity" };
         return await shop.setDojo(req.network, req.dojo);
       }
+      // ---- PayNym registration -------------------------------------------
+      // The gateway signs; the server speaks to the directory. The process
+      // holding the seed keeps no network access, so the dance is split at the
+      // only point that needs a key.
+      //
+      // This is NOT a general signing op, and identity.signToken says why at
+      // length: the notification key also signs invoice addresses, so a
+      // sign-anything op here would let a compromised web server mint an
+      // address record customers would accept.
+      case "paynym-sign": {
+        if (!shop) return { error: "this gateway was not started with a shop identity" };
+        if (!isNetwork(req.network)) return { error: `unknown network: ${req.network}` };
+        try { return { signature: shop.identities[req.network].signToken(req.token) }; }
+        catch (e) { return { error: e.message }; }
+      }
+      case "record-nym": {
+        if (!shop) return { error: "this gateway was not started with a shop identity" };
+        return await shop.recordNym(req.network, { nymName: req.nymName, nymId: req.nymId });
+      }
+      case "record-notification": {
+        if (!shop) return { error: "this gateway was not started with a shop identity" };
+        return await shop.recordNotification(req.network, req.txid);
+      }
       // The only op that discloses the seed. Separate from "identity" so the
       // one code path that can hand over the words is the one asked for exactly
       // that, and so nothing that merely reads status can leak them.
@@ -268,6 +292,18 @@ export function makeShop({ dataDir, state, identities }) {
       current = setDojo(current, network, dojo);
       await saveState(dataDir, current);
       return { ok: true, network, dojo: current.networks[network].dojo };
+    },
+    async recordNym(network, nym) {
+      current = recordNym(current, network, nym);
+      await saveState(dataDir, current);
+      const b = current.networks[network];
+      return { ok: true, network, nymName: b.nymName, nymId: b.nymId };
+    },
+    async recordNotification(network, txid) {
+      current = recordNotification(current, network, txid);
+      await saveState(dataDir, current);
+      const b = current.networks[network];
+      return { ok: true, network, notificationTxid: b.notificationTxid, notificationSentAt: b.notificationSentAt };
     },
     revealSeed: () => revealMnemonic(dataDir),
     identities,
