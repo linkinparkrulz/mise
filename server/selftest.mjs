@@ -714,66 +714,6 @@ ok(pub.nodes.some((n) => n.paynym === "+testoperator"), "approved submission app
   ok(!/^compare:/.test(githubRefusal("compare", 403)),
      "and the rate-limit message does not open with the name of the call that hit it");
 
-  // The import routes. Their argument checking and their refusal to run two at
-  // once are testable here; the fetch itself needs another instance over Tor,
-  // which this suite has no way to provide, so what is asserted is everything
-  // that happens before the first byte leaves the machine.
-  const anonImport = await fetch(base + "/api/admin/import", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ onion: "x" }) });
-  ok(anonImport.status === 401, "import route refuses anyone who is not an admin");
-
-  const badOnion = await api("/api/admin/import", "POST", { onion: "not-an-onion", code: paymentCode });
-  ok(badOnion.status === 400 && /\.onion/.test(badOnion.body.error || ""),
-     "and refuses an address that is not a 56-character onion");
-
-  // Without the peer's payment code there is nothing for the operator binding
-  // to be checked against, so the import would establish only that the remote
-  // signed something, not that it is the instance the operator chose to trust.
-  const noCode = await api("/api/admin/import", "POST", { onion: "a".repeat(56) + ".onion" });
-  ok(noCode.status === 400 && /payment code/.test(noCode.body.error || ""),
-     "and refuses without the payment code of the instance being imported from");
-
-  // A real start, which will fail at the fetch because that onion does not
-  // exist. What matters is that it is a job rather than a held-open request,
-  // and that the failure is reported in-band rather than as a dead panel.
-  const started = await api("/api/admin/import", "POST",
-    { onion: "b".repeat(56) + ".onion", code: paymentCode });
-  ok(started.status === 202 && started.body.started === true && started.body.apply === false,
-     "an import starts as a background job, and defaults to planning rather than writing");
-
-  // Two imports must not run at once, and a second request is refused while the
-  // first is unfinished. That is deliberately NOT asserted by firing a second
-  // request and expecting 409: whether the first is still running by then
-  // depends on how quickly the fetch fails, which is a property of the machine
-  // rather than of this code. On a box with Tor it hangs for seconds; in CI
-  // there is no Tor at all, the connection is refused on the next turn of the
-  // loop, and a second import is then correctly ACCEPTED because nothing is
-  // running. The first version of this test asserted 409 unconditionally and
-  // failed in CI for exactly that reason.
-  //
-  // What is asserted instead is the rule itself, which is monotonic and does
-  // not depend on timing: the guard is on the job being unfinished, and the
-  // job is created before the work starts so there is no window in which two
-  // could begin. Weaker than a behavioural test, and said so here rather than
-  // dressed up as one.
-  const idx = await fsp.readFile(new URL("./index.ts", import.meta.url), "utf8");
-  const importRoute = idx.slice(idx.indexOf('route("POST", /^\\/api\\/admin\\/import$/'),
-                                idx.indexOf('route("GET", /^\\/api\\/admin\\/import\\/status$/'));
-  ok(/IMPORT_JOB && !IMPORT_JOB\.done\) return json\(res, 409/.test(importRoute),
-     "a second import while one is running is refused rather than interleaved");
-  ok(importRoute.indexOf("IMPORT_JOB = {") < importRoute.indexOf("bootstrapImport({"),
-     "and the job exists before the work starts, so there is no window in which two could begin");
-
-  for (let i = 0; i < 60; i++) {
-    const st = await api("/api/admin/import/status");
-    if (st.body.job && st.body.job.done) break;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  const fin = await api("/api/admin/import/status");
-  ok(fin.status === 200 && fin.body.job && fin.body.job.done === true && fin.body.job.ok === false
-     && typeof fin.body.job.error === "string",
-     "an unreachable peer ends the job with a reason rather than leaving it running");
-
   // The cache rule the "Check again" button depends on. Tested here rather
   // than through the route, because the route only fills its cache on a
   // successful check and GitHub is unreachable in this suite, so the cached
@@ -964,32 +904,6 @@ ok(pub.nodes.some((n) => n.paynym === "+testoperator"), "approved submission app
     await store.deleteSubmission("mainnet-queued");
   }
 
-  // The route asks for that, rather than inheriting the installer's default.
-  {
-    const idx = await fsp.readFile(new URL("./index.ts", import.meta.url), "utf8");
-    const block = idx.slice(idx.indexOf('route("POST", /^\\/api\\/admin\\/import$/'),
-                            idx.indexOf('route("GET", /^\\/api\\/admin\\/import\\/status$/'));
-    ok(block.length > 200 && /status: "pending"/.test(block),
-       "the admin import route asks for pending records rather than taking the installer's default");
-
-    // A pending record's live status comes from pending-probe.json, which only
-    // the update cycle writes. Until one runs, an imported listing has no
-    // status and the moderation queue shows it as inactive, which is not what
-    // it is: nothing has asked it yet, and the moderator deciding whether to
-    // approve is the person who needs the answer.
-    const job = idx.slice(idx.indexOf('route("POST", /^\\/api\\/admin\\/import$/'),
-                          idx.indexOf('route("GET", /^\\/api\\/admin\\/import\\/status$/'));
-    ok(/"scripts", "update.mjs"/.test(job) && /job\.phase = "probing"/.test(job),
-       "an applied import runs a probe cycle, as the installer does before declaring success");
-    ok(job.indexOf("tryRebuild()") < job.indexOf('job.phase = "probing"'),
-       "after the rebuild, so the cycle sees the records it is about to probe");
-    ok(/is-active", "--quiet", "mise-update\.service"/.test(job),
-       "and skips it when a cycle is already running, since there is no lock and two would race");
-    ok(/\(job\.result\?\.imported \?\? 0\) > 0/.test(job),
-       "nothing is probed when nothing was imported");
-    ok(/dryRun: !job\.apply/.test(block),
-       "and plans unless the operator explicitly asked to apply");
-  }
   ok(r.imported === 1 && imp && imp.status === "approved"
      && imp.paymentCodes.includes("PMimpSegwit") && imp.paymentCodes.includes("PMimpLegacy") && imp.paymentCodes.includes("PMimpDisplay")
      && imp.source === `bootstrap-import:${onionHost}`

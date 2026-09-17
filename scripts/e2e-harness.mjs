@@ -200,7 +200,39 @@ ok("90-day strip on the card, hydrated, with pct \u00b7 up/total day stat");
 // at 60% was counted as up in the footer (threshold 50) while the square beside
 // it was painted amber (green at 99). They now share one definition of a good
 // day, so the footer is a count of the green squares above it. kilombino runs
-// at a flat 90% and is the case that exposed the old mismatch.
+// at a flat 90% and is the case that exposed the old mismatch.// The shop wallet's deposit address, as something a phone can scan.
+//
+// The operator has to fund this wallet from a mobile wallet, and reading a
+// bech32 address off a screen to retype it is both miserable and a way to lose
+// money to a typo. So it is a QR, built the same way the pairing QR is, with
+// the wallet's own PayNym avatar centred on it so one of these is recognisable
+// as THIS shop's wallet rather than any address.
+{
+  const app = readFileSync(REPO + "/assets/js/app.js", "utf8");
+  const fn = app.slice(app.indexOf("function depositQR(b){"), app.indexOf("function shopCard()"));
+  assert.ok(fn.length > 0, "the deposit address has a QR renderer");
+
+  // Error correction H, not the default M: the avatar covers part of the symbol
+  // and only H carries enough recovery for that. A QR that scans on the bench
+  // and fails with the avatar over it is the failure being prevented.
+  assert.ok(/qrSVG\(addr, 200, "H"\)/.test(fn), "generated at error-correction H, because an avatar sits on it");
+  assert.ok(/class="qr-avatar"/.test(fn) && /onerror="this.remove\(\)"/.test(fn),
+    "the avatar is centred on it and removes itself when there is none yet");
+  assert.ok(/b\.depositAddress/.test(fn) && !/notificationAddress/.test(fn),
+    "it encodes the DEPOSIT address: the notification address is not where money goes");
+
+  // A bare address rather than a bitcoin: URI. A URI opens straight into a send
+  // screen, which is nicer until a mainnet wallet is handed a testnet4 address.
+  assert.ok(!/bitcoin:/.test(fn), "a bare address, so a mainnet wallet cannot be walked into a testnet send");
+
+  // Rendered inline, not deferred to a hook that has to find it afterwards.
+  // The previous version set data-qr on an empty div and nothing ever read it,
+  // which is exactly how an address ends up copy-and-paste only.
+  assert.ok(!/data-qr/.test(app), "no placeholder div left waiting for a renderer that does not exist");
+  ok("the deposit address is scannable, at EC level H, with the wallet's avatar on it");
+}
+
+
 {
   const kFoot = doc.querySelector('.card[data-id="mainnet-kilombino"] .hist90 .d90foot');
   const kBars = [...doc.querySelectorAll('.card[data-id="mainnet-kilombino"] .hist90 .d90')];
@@ -974,51 +1006,6 @@ ok("footer source-download icon links the instance's own code zip");
   ok("a rate-limited exit is explained, and leaves the peer route open");
 }
 
-// Importing listings from another mise, from the console.
-//
-// The premise is that the other directory is not trusted, so the interface has
-// to make the plan the thing an operator reads and the write the thing they
-// choose. A single button that fetched and imported would defeat every check
-// underneath it, since nobody refuses a plan they were never shown.
-{
-  const app = readFileSync(REPO + "/assets/js/app.js", "utf8");
-  const fn = app.slice(app.indexOf("function importLine()"), app.indexOf("async function startImport"));
-
-  assert.ok(/data-adm="import-plan"/.test(fn), "the panel offers an import");
-  // Apply is conditional on a plan having come back with something in it, so
-  // the first click can never be the one that writes.
-  const applyLine = fn.slice(fn.indexOf("const apply ="), fn.indexOf("return '<div class=\"upd-run\"'"));
-  assert.ok(/j\.done && j\.ok && !j\.apply/.test(applyLine),
-    "and the apply control appears only after a plan has come back");
-  assert.ok(/res\.planned > 0/.test(applyLine),
-    "and only when there is something to import");
-  assert.ok(/imp-' \+ esc\(r\.action\)/.test(fn) && /refused: /.test(fn),
-    "refused rows are shown with their reason rather than reduced to a count");
-  assert.ok(/already listed as /.test(fn),
-    "and a node this instance already has is named as such, not offered again");
-  assert.ok(/Pending review/.test(fn),
-    "the panel says imports arrive pending rather than on the site");
-  // The probe cycle after an import takes about a minute, which is most of the
-  // wall-clock time and the least obvious part of it. A panel that said only
-  // "Importing…" throughout would look stuck at the point it is working.
-  assert.ok(/probing: "probing the imported nodes over Tor/.test(fn),
-    "and names the phase, so the slow probe step does not read as a hang");
-
-  const dispatch = app.slice(app.indexOf('if(act==="import-plan")'), app.indexOf('if(act==="update-peer")'));
-  // Matched on the argument, not the whole call: the onion is normalised with
-  // two regexes whose closing brackets defeat a naive [^)]* match.
-  assert.ok(/, code, false\);/.test(dispatch), "the first action plans rather than writes");
-  assert.ok(/IMPORT_LAST\.onion, IMPORT_LAST\.code, true/.test(dispatch),
-    "and applying re-uses the details the plan was made from, so the plan on screen is the plan accepted");
-  assert.ok(/confirm\(/.test(dispatch), "with a confirmation naming what is about to happen");
-
-  // Declared above its first reader. A let below the code that assigns it works
-  // only because the function runs after module evaluation, and that has failed
-  // outright in this codebase before.
-  assert.ok(app.indexOf("let IMPORT_LAST") < app.indexOf("IMPORT_LAST = { onion, code }"),
-    "IMPORT_LAST is declared above the code that sets it");
-  ok("an import is planned before it is applied, and refusals are shown");
-}
 
 // The banner has moved to the clearnet site, so it is not here twice.
 {

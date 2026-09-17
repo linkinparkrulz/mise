@@ -1337,7 +1337,6 @@ async function loadJSON(url){
       '<button class="abtn" data-adm="logout" style="margin-left:8px">Sign out</button> '+
       '<span style="font-size:12px;color:var(--faint)">(the same Auth47 session as Manage my Dojo; signing out here signs you out there too)</span></p>'+
       updatesLine()+
-      importLine()+
       shopCard()+
       (ADMIN_NOTICE?'<p style="font-size:12.5px;color:var(--down);border:1px solid var(--down);border-radius:8px;padding:8px 12px">'+esc(ADMIN_NOTICE)+'</p>':"")
     );
@@ -1353,6 +1352,30 @@ async function loadJSON(url){
     if(r.status === 200){ SHOP = r.body; SHOP_ERROR = null; SHOP_NET = SHOP_NET || SHOP.active; }
     else { SHOP = null; SHOP_ERROR = (r.body && r.body.error) || ("HTTP " + r.status); }
     renderAdminPanel();
+  }
+
+  // The deposit address as something a phone can scan, built the same way the
+  // Dojo pairing QR is: qrSVG at error-correction H with the wallet's own PayNym
+  // avatar centred on it. The avatar is what makes one of these recognisable at
+  // a glance as THIS shop's wallet rather than any address — the same job it
+  // does on a listing card — and onerror removes it silently, so the QR is
+  // correct before the nym is ever claimed.
+  //
+  // A bare address, not a bitcoin: URI. A URI opens the phone's wallet straight
+  // into a send screen, which is nicer right up until a mainnet wallet is handed
+  // a testnet4 address; every scanner reads a bare address and the operator
+  // chooses the wallet.
+  function depositQR(b){
+    const addr = b.depositAddress || "";
+    if(!addr) return "";
+    const avatar = b.paymentCode
+      ? '<img class="qr-avatar" alt="" fetchpriority="high" decoding="async" src="data/avatars/'
+        + encodeURIComponent(b.paymentCode) + '.png" onerror="this.remove()">'
+      : "";
+    return '<div class="qr" style="margin-top:10px">'+
+      '<div class="tile" style="display:inline-block">'+qrSVG(addr, 200, "H")+avatar+'</div>'+
+      '<div><code class="pc-chip" data-copy="'+esc(addr)+'" style="margin-top:6px;display:inline-block">'+
+      esc(addr)+'</code></div></div>';
   }
 
   function shopCard(){
@@ -1405,8 +1428,7 @@ async function loadJSON(url){
             'It has to publish one BIP47 notification transaction so your own wallet starts watching '+
             'for the addresses this shop derives. That costs a fee, once, and never again. Send '+
             (net==='bitcoin'?'about 10,000 sats':'a faucet drip')+' to:'+
-            '<br><code>'+esc(b.depositAddress||'')+'</code>'+
-            '<div id="shop-qr" data-qr="'+esc(b.depositAddress||'')+'" style="margin-top:8px"></div></div>'
+            depositQR(b)+'</div>'
           : '<p style="font-size:12.5px;color:var(--faint)">Notification sent \u2014 <code>'+esc(String(b.notificationTxid).slice(0,16))+'\u2026</code></p>')+
         // The shop's own notification address, labelled as what it is for. It
         // was the funding target once, wrongly, so leaving it unlabelled invites
@@ -1434,15 +1456,6 @@ async function loadJSON(url){
 
   let ADMIN_NOTICE = null;
   let ADMIN_UPDATES = null, ADMIN_UPDATES_LOADING = false, ADMIN_LAST = null;
-  // The import job, polled the same way an update is. Declared here, above the
-  // functions that read it, because a const or let below its first reader has
-  // failed outright in this codebase before.
-  let IMPORT_RUN = null;   // {phase, log[], done, ok, error, apply, onion, result}
-  let IMPORT_POLL = null;
-  // The onion and code of the plan being looked at, so applying does not ask
-  // for them again. Held only here: the payment code is public, but which
-  // instance this operator is pairing with is not written anywhere.
-  let IMPORT_LAST = null;
   let UPDATE_RUN = null;   // {phase, log[], done, ok, error, needsRefresh}
   let UPDATE_POLL = null;
   const UPDATE_PHASES = ["starting","fetching","applying","restarting"];
@@ -1582,90 +1595,8 @@ async function loadJSON(url){
       + (j.error? '<button class="abtn" data-adm="update-dismiss">Dismiss</button>':'')
       + '</div>';
   }
-  // Importing listings from another mise.
-  //
-  // Two steps, always. The premise of importing from another directory is that
-  // you do not trust it, so the operator sees the plan before anything is
-  // written: what would be imported, what this instance already lists under a
-  // different id, and what is refused and why. Apply only appears once a plan
-  // has come back, so the button that writes cannot be the first one clicked.
-  function importLine(){
-    const j = IMPORT_RUN;
-    if(!j){
-      return '<div style="margin:14px 0 4px">'
-        + '<button class="abtn" data-adm="import-plan">Import Dojos from another mise\u2026</button>'
-        + '<p style="font-size:12px;color:var(--faint);margin:6px 0 0">'
-        + 'Fetches another instance\u2019s published list over Tor and shows what it would add. '
-        + 'Nothing is written until you say so, every listing\u2019s own signature is checked here, '
-        + 'and anything imported arrives in Pending review rather than on the site.</p></div>';
-    }
-    const res = j.result || null;
-    const rows = (res && res.plan) || [];
-    const counts = res
-      ? [res.planned + ' to import', res.merged + ' already listed here', res.refused + ' refused']
-      : [];
-    // The refused rows are the ones worth reading, so they are not collapsed
-    // away: a directory publishing listings this instance will not accept is
-    // something an operator should see rather than a number.
-    const table = rows.length
-      ? '<table class="imp"><thead><tr><th>Node</th><th>Network</th><th>Pairing</th><th></th></tr></thead><tbody>'
-        + rows.map(r => '<tr class="imp-' + esc(r.action) + '"><td>' + esc(r.name)
-            + (r.paynym ? ' <span style="color:var(--faint)">' + esc(r.paynym) + '</span>' : '')
-            + '</td><td>' + esc(r.network || "") + '</td><td><code style="font-size:11px">'
-            + esc(String(r.url || "").replace(/^https?:\/\//, "").slice(0, 22)) + '\u2026</code></td><td>'
-            + (r.action === "import" ? 'import'
-               : r.action === "merge" ? 'already listed as ' + esc(r.dupOf || "")
-               : 'refused: ' + esc(r.why || "")) + '</td></tr>').join("")
-        + '</tbody></table>'
-      : "";
-    const apply = (j.done && j.ok && !j.apply && res && res.planned > 0)
-      ? '<button class="abtn" data-adm="import-apply">Import ' + res.planned + ' listing'
-        + (res.planned === 1 ? '' : 's') + ' as pending</button> '
-      : "";
-    // The phase, while it is running. Importing is quick and the probe cycle
-    // afterwards takes about a minute, so a panel that said only "Importing…"
-    // for that minute would look stuck at the point it is doing the slowest
-    // and least obvious part of the work.
-    const phase = j.done ? "" : ({ planning: "reading their list",
-      importing: "importing", rebuilding: "rebuilding the public list",
-      probing: "probing the imported nodes over Tor, about a minute" }[j.phase] || j.phase || "");
-    return '<div class="upd-run"><p><b>' + (j.apply ? 'Importing from ' : 'Planning an import from ')
-      + '</b><code style="font-size:11px">' + esc(j.onion || "") + '</code>'
-      + (j.done ? "" : ' \u2026 ' + esc(phase)) + '</p>'
-      + (j.error ? '<p class="upd-warn">' + esc(j.error) + '</p>' : "")
-      + (counts.length ? '<p style="font-size:12px;color:var(--muted)">' + counts.join(' \u00b7 ') + '</p>' : "")
-      + table
-      + (j.done && j.apply && j.ok
-          ? '<p style="font-size:12px;color:var(--up)">Imported. They are in Pending review below, '
-            + 'unpublished until you approve them.</p>' : "")
-      + '<p style="margin-top:8px">' + apply
-      + '<button class="abtn" data-adm="import-dismiss">' + (j.done ? 'Close' : 'Hide') + '</button></p></div>';
-  }
 
-  async function startImport(onion, code, apply){
-    IMPORT_RUN = { phase:"starting", log:[], done:false, ok:false, apply, onion, result:null,
-      error:null };
-    renderAdminPanel();
-    const r = await api.call("/admin/import","POST",{ onion, code, apply });
-    if(r.status===409){ IMPORT_RUN=null; ADMIN_NOTICE="An import is already in progress."; renderAdminPanel(); return; }
-    if(r.status!==202){ IMPORT_RUN.error=(r.body&&r.body.error)||("HTTP "+r.status); IMPORT_RUN.done=true; renderAdminPanel(); return; }
-    // The onion and code are kept only in this closure, for the apply step, so
-    // that applying does not ask for them a second time. They are not written
-    // anywhere: the payment code is public, but the pairing is between this
-    // operator and that instance and does not belong in storage.
-    IMPORT_LAST = { onion, code };
-    pollImport();
-  }
-  function pollImport(){
-    clearInterval(IMPORT_POLL);
-    IMPORT_POLL = setInterval(async ()=>{
-      let r; try{ r = await api.call("/admin/import/status"); } catch(e){ return; }
-      if(r.status!==200 || !r.body || !r.body.job) return;
-      IMPORT_RUN = r.body.job;
-      if(IMPORT_RUN.done){ clearInterval(IMPORT_POLL); IMPORT_POLL=null; }
-      renderAdminPanel();
-    }, 1200);
-  }
+
 
   async function startUpdate(source, extra){
     UPDATE_RUN = /** @type {{ phase: string, log: string[], done: boolean, source: any, error?: string }} */
@@ -1755,23 +1686,6 @@ async function loadJSON(url){
         alert("This instance is already on the latest commit. There is nothing to fetch."); return;
       }
       if(confirm("Update this instance from GitHub over Tor?\n\nSELF-UPDATE IS EXPERIMENTAL. The service will restart; if it does not come back you will need shell access to the box. A full copy of the current code is kept under data/backups/.")) startUpdate("github"); return; }
-    if(act==="import-plan"){
-      const onion=prompt("The .onion of the mise to import from:"); if(!onion) return;
-      const code=prompt("That instance operator's BIP47 payment code (verifies whose list this is):")||"";
-      startImport(String(onion).replace(/^https?:\/\//,"").replace(/\/.*$/,""), code, false);
-      return;
-    }
-    if(act==="import-apply"){
-      // The plan on screen was produced from these details, so applying re-uses
-      // them rather than asking again: retyping an onion between seeing a plan
-      // and accepting it is a chance to accept a plan from somewhere else.
-      if(!IMPORT_LAST) return;
-      const n = (IMPORT_RUN && IMPORT_RUN.result && IMPORT_RUN.result.planned) || 0;
-      if(!confirm("Import "+n+" listing"+(n===1?"":"s")+" from "+IMPORT_LAST.onion+"?\n\nThey arrive as Pending review and are not published until you approve them. Their signatures have already been verified here.")) return;
-      startImport(IMPORT_LAST.onion, IMPORT_LAST.code, true);
-      return;
-    }
-    if(act==="import-dismiss"){ clearInterval(IMPORT_POLL); IMPORT_POLL=null; IMPORT_RUN=null; renderAdminPanel(); return; }
     if(act==="update-peer"){
       const onion=prompt("Trusted peer .onion to update from:"); if(!onion) return;
       const code=prompt("That operator's BIP47 payment code (verifies who you're trusting):")||"";
